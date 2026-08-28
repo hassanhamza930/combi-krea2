@@ -35,6 +35,9 @@ command -v aria2c >/dev/null 2>&1 || {
 size_at_least() { [ -f "$1" ] && [ "$(stat -c%s "$1")" -ge "$2" ]; }
 
 # [FIX-1] adl <outfile> <url> [--header "<hdr>"] : header is ONE argument now
+# [FIX-4] HF xet-bridge CDN returns HTTP 400 to multi-connection downloads;
+#         after aria2c retries fail, fall back to curl -L -C - (resumable
+#         single-stream, ~70MB/s from HF - your own rp_dl.sh documented this).
 adl() {
   local out="$1" url="$2" hdr="${3:-}" input i dir base
   dir="$(dirname "$out")"; base="$(basename "$out")"
@@ -56,7 +59,12 @@ adl() {
     fi
     rm -f -- "$input"; echo "retry $i for $out"; sleep 5
   done
-  echo "FATAL: download failed: $url"; return 1
+  echo "aria2c failed 5x for $out; falling back to curl single-stream (FIX-4)"
+  if [ -n "$hdr" ]; then
+    curl -sS -L --retry 5 --retry-delay 5 -C - --header "$hdr" -o "$out" "$url"
+  else
+    curl -sS -L --retry 5 --retry-delay 5 -C - -o "$out" "$url"
+  fi
 }
 
 # 1) FinePorn v4 NVFP4 checkpoint (~7.7 GB, CivitAI authenticated via URL token)
@@ -79,7 +87,7 @@ else
   printf '%s  %s\n' "$EXPECTED_SHA" "$UNET" | sha256sum -c - && touch "$UNET.done"
 fi
 
-# 2) Qwen3-VL 4B text encoder, fp8 scaled (~5.0 GB, HF authenticated) [FIX-1]
+# 2) Qwen3-VL 4B text encoder, fp8 scaled (~5.0 GB, HF authenticated) [FIX-1][FIX-4]
 CLIP="$MODELS/text_encoders/qwen3vl_4b_fp8_scaled.safetensors"
 if ! size_at_least "$CLIP" 4000000000; then
   echo "downloading Qwen3-VL 4B fp8 text encoder (~5.0 GB, aria2c x16)"
