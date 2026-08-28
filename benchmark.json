@@ -51,10 +51,10 @@
   "class_type": "KSampler",
   "inputs": {
    "seed": "__RANDOM_INT__",
-   "steps": 8,
+   "steps": 16,
    "cfg": 1.0,
-   "sampler_name": "euler",
-   "scheduler": "simple",
+   "sampler_name": "euler_ancestral",
+   "scheduler": "beta",
    "denoise": 1.0,
    "model": [
     "8",
