@@ -34,10 +34,36 @@ command -v aria2c >/dev/null 2>&1 || {
 
 size_at_least() { [ -f "$1" ] && [ "$(stat -c%s "$1")" -ge "$2" ]; }
 
-# [FIX-1] adl <outfile> <url> [--header "<hdr>"] : header is ONE argument now
-# [FIX-4] HF xet-bridge CDN returns HTTP 400 to multi-connection downloads;
-#         after aria2c retries fail, fall back to curl -L -C - (resumable
-#         single-stream, ~70MB/s from HF - your own rp_dl.sh documented this).
+# [FIX-8] A safetensors file declares its own byte length in its header. A
+# truncated OR over-appended file fails this, so a loose size check can never
+# again let a corrupt model through.
+st_ok() { # st_ok <file>
+  [ -s "$1" ] || return 1
+  python3 - "$1" <<'PY'
+import json, os, struct, sys
+p = sys.argv[1]
+try:
+    with open(p, "rb") as f:
+        n = struct.unpack("<Q", f.read(8))[0]
+        if n <= 0 or n > 100_000_000:
+            sys.exit(1)
+        h = json.loads(f.read(n))
+    end = max(v["data_offsets"][1] for k, v in h.items() if k != "__metadata__")
+    sys.exit(0 if os.path.getsize(p) == 8 + n + end else 1)
+except Exception:
+    sys.exit(1)
+PY
+}
+
+# adl <outfile> <url> [raw-header-value]
+# [FIX-1] header travels as ONE argument.
+# [FIX-6] the header VALUE is arg 3 - call sites no longer pass a stray
+#         "--header" token that used to be sent as the header itself.
+# [FIX-4] HF's xet-bridge CDN answers 400 to multi-connection downloads, so
+#         after aria2c gives up we retry single-stream with curl.
+# [FIX-7] the aria2c leftovers are deleted BEFORE the curl fallback. Resuming
+#         curl onto an aria2c partial appends onto garbage and produces a file
+#         that is bigger than the real model and silently unusable.
 adl() {
   local out="$1" url="$2" hdr="${3:-}" input i dir base
   dir="$(dirname "$out")"; base="$(basename "$out")"
@@ -59,11 +85,13 @@ adl() {
     fi
     rm -f -- "$input"; echo "retry $i for $out"; sleep 5
   done
-  echo "aria2c failed 5x for $out; falling back to curl single-stream (FIX-4)"
+
+  echo "aria2c failed 5x for $out; restarting clean with curl single-stream [FIX-4/FIX-7]"
+  rm -f -- "$out" "$out.aria2"
   if [ -n "$hdr" ]; then
-    curl -sS -L --retry 5 --retry-delay 5 -C - --header "$hdr" -o "$out" "$url"
+    curl -fsS -L --retry 5 --retry-delay 5 --header "$hdr" -o "$out" "$url"
   else
-    curl -sS -L --retry 5 --retry-delay 5 -C - -o "$out" "$url"
+    curl -fsS -L --retry 5 --retry-delay 5 -o "$out" "$url"
   fi
 }
 
@@ -87,27 +115,39 @@ else
   printf '%s  %s\n' "$EXPECTED_SHA" "$UNET" | sha256sum -c - && touch "$UNET.done"
 fi
 
-# 2) Qwen3-VL 4B text encoder, fp8 scaled (~5.0 GB, HF authenticated) [FIX-1][FIX-4]
+# 2) Qwen3-VL 4B text encoder, fp8 scaled (~5.0 GB, HF authenticated)
+#    [FIX-1][FIX-4][FIX-6][FIX-8]
 CLIP="$MODELS/text_encoders/qwen3vl_4b_fp8_scaled.safetensors"
-if ! size_at_least "$CLIP" 4000000000; then
+if st_ok "$CLIP"; then
+  echo "have valid qwen3vl_4b text encoder"
+else
+  [ -e "$CLIP" ] && { echo "existing text encoder is corrupt; discarding"; rm -f "$CLIP" "$CLIP.aria2"; }
   echo "downloading Qwen3-VL 4B fp8 text encoder (~5.0 GB, aria2c x16)"
-  adl "$CLIP" "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/text_encoders/qwen3vl_4b_fp8_scaled.safetensors" \
-    --header "Authorization: Bearer $HF_TOKEN"
+  adl "$CLIP" "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/text_encoders/qwen3vl_4b_fp8_scaled.safetensors"     "Authorization: Bearer $HF_TOKEN"
+  st_ok "$CLIP" || { echo "FATAL: text encoder failed validation"; exit 1; }
 fi
 
-# 3) Qwen-Image VAE (~242 MB, public HF)
+# 3) Qwen-Image VAE (~242 MB, public HF) [FIX-8]
 VAE="$MODELS/vae/qwen_image_vae.safetensors"
-if ! size_at_least "$VAE" 200000000; then
+if st_ok "$VAE"; then
+  echo "have valid qwen_image_vae"
+else
+  [ -e "$VAE" ] && { echo "existing VAE is corrupt; discarding"; rm -f "$VAE" "$VAE.aria2"; }
   echo "downloading Qwen-Image VAE (~242 MB, aria2c x16)"
   adl "$VAE" "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/vae/qwen_image_vae.safetensors"
+  st_ok "$VAE" || { echo "FATAL: VAE failed validation"; exit 1; }
 fi
 
-# 4) Alice character LoRA (private HF repo, ~109 MB, HF authenticated) [FIX-1]
+# 4) Alice character LoRA (private HF repo, ~109 MB, HF authenticated)
+#    [FIX-1][FIX-6][FIX-8]
 ALICE="$MODELS/loras/alice_character_v1.safetensors"
-if ! size_at_least "$ALICE" 100000000; then
+if st_ok "$ALICE"; then
+  echo "have valid alice_character_v1 LoRA"
+else
+  [ -e "$ALICE" ] && { echo "existing Alice LoRA is corrupt; discarding"; rm -f "$ALICE" "$ALICE.aria2"; }
   echo "downloading Alice LoRA (~109 MB, aria2c x16)"
-  adl "$ALICE" "https://huggingface.co/freakH2O/alic3-krea2-lora/resolve/main/alice_character_v1.safetensors" \
-    --header "Authorization: Bearer $HF_TOKEN"
+  adl "$ALICE" "https://huggingface.co/freakH2O/alic3-krea2-lora/resolve/main/alice_character_v1.safetensors"     "Authorization: Bearer $HF_TOKEN"
+  st_ok "$ALICE" || { echo "FATAL: Alice LoRA failed validation"; exit 1; }
 fi
 
 # 5) Benchmark workflow where the pyworker's BENCHMARK_JSON_PATH looks
