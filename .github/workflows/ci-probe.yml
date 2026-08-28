@@ -1,0 +1,17 @@
+name: ci-probe
+on:
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: disk + minutes check
+        run: |
+          echo "=== runner disk ==="
+          df -h /
+          echo "=== after docker prune (space we can reclaim) ==="
+          docker system prune -af >/dev/null 2>&1 || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache 2>/dev/null || true
+          df -h /
+          echo "=== net speed from runner ==="
+          curl -s -o /dev/null -w "HF: %{speed_download} B/s\n" --max-time 10 -L https://huggingface.co/Comfy-Org/Krea-2/resolve/main/vae/qwen_image_vae.safetensors
