@@ -23,12 +23,14 @@ command -v aria2c >/dev/null 2>&1 || {
 
 size_at_least() { [ -f "$1" ] && [ "$(stat -c%s "$1")" -ge "$2" ]; }
 
-adl() { # adl <outfile> <url>
-  local out="$1" url="$2" input i
+adl() { # adl <outfile-abs-path> <url>
+  local out="$1" url="$2" input i dir base
+  dir="$(dirname "$out")"; base="$(basename "$out")"
+  mkdir -p "$dir"
   for i in 1 2 3 4 5; do
     input="$(mktemp)"; chmod 600 "$input"
-    printf '%s\n  out=%s\n' "$url" "$out" > "$input"
-    if aria2c -c -x16 -s16 -k8M --file-allocation=none \
+    printf '%s\n  out=%s\n' "$url" "$base" > "$input"
+    if aria2c -c -x16 -s16 -k8M --file-allocation=none -d "$dir" \
          --console-log-level=warn --summary-interval=0 --input-file="$input"; then
       rm -f -- "$input"; return 0
     fi
