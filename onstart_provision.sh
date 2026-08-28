@@ -7,8 +7,8 @@
 # Idempotent: skips anything already downloaded and verified.
 set -euo pipefail
 
-COMFY_DIR="/opt/comfyui/ComfyUI"
-MODELS="$COMFY_DIR/models"
+COMFY_SRC="/opt/workspace-internal/ComfyUI"
+MODELS="$COMFY_SRC/models"
 
 CIVITAI_TOKEN="${CIVITAI_TOKEN:-}"
 HF_TOKEN="${HF_TOKEN:-}"
@@ -42,10 +42,19 @@ UNET="$MODELS/diffusion_models/krea2_turbo_fineporn_v4_nvfp4.safetensors"
 EXPECTED_SHA="11441bcc57f9e846e47bbab17044c7d4d848ee13ebf717d08a0280f6d1d2b9cf"
 if [ -s "$UNET" ] && printf '%s  %s\n' "$EXPECTED_SHA" "$UNET" | sha256sum -c - >/dev/null 2>&1; then
   echo "have verified fineporn_v4_nvfp4"
+elif [ -s "$UNET" ] && [ ! -f "$UNET.done" ]; then
+  echo "file present but unverified; verifying in place (no re-download)"
+  if printf '%s  %s\n' "$EXPECTED_SHA" "$UNET" | sha256sum -c - >/dev/null 2>&1; then
+    touch "$UNET.done"; echo "checksum OK (existing file)"
+  else
+    echo "checksum mismatch; re-downloading"
+    adl "$UNET" "https://civitai.red/api/download/models/3215452?fileId=3097278&token=$CIVITAI_TOKEN"
+    printf '%s  %s\n' "$EXPECTED_SHA" "$UNET" | sha256sum -c - && touch "$UNET.done"
+  fi
 else
   echo "downloading FinePorn v4 NVFP4 (~7.7 GB, aria2c x16)"
   adl "$UNET" "https://civitai.red/api/download/models/3215452?fileId=3097278&token=$CIVITAI_TOKEN"
-  printf '%s  %s\n' "$EXPECTED_SHA" "$UNET" | sha256sum -c -
+  printf '%s  %s\n' "$EXPECTED_SHA" "$UNET" | sha256sum -c - && touch "$UNET.done"
 fi
 
 # 2) Qwen3-VL 4B text encoder, fp8 scaled (~5.0 GB, HF authenticated, 16-conn)
@@ -73,6 +82,11 @@ fi
 
 # 5) Benchmark workflow where the pyworker's BENCHMARK_JSON_PATH looks
 install -m 644 /root/benchmark.json /workspace/benchmark.json 2>/dev/null || true
+
+# 6) Expose ComfyUI where the image's supervisor scripts expect it
+#    (symlink: instant, no copy; /workspace is persistent per-worker)
+mkdir -p /workspace
+ln -sfn "$COMFY_SRC" /workspace/ComfyUI
 
 echo "model provisioning complete; releasing /.provisioning gate"
 rm -f /.provisioning
