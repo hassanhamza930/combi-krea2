@@ -9,7 +9,7 @@
 #    while the /.provisioning gate is held.
 set -euo pipefail
 
-PIN="77be0ea91724d919c23640661f7ffcf1b15b0d15"
+PIN="e150265529825af6375ef6760fd62fc75ce3688c"
 BASE="https://raw.githubusercontent.com/hassanhamza930/combi-krea2/${PIN}"
 
 mkdir -p /var/log/portal /workspace
