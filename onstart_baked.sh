@@ -42,23 +42,39 @@ if [ -n "${SELFDESTRUCT_KEY:-}" ]; then
   cat > /root/idle_destroy.sh <<'EOS'
 #!/bin/bash
 KEY="$SELFDESTRUCT_KEY"
-ID="$(hostname)"
-if ! curl -s --max-time 10 -H "Authorization: Bearer $KEY" "https://console.vast.ai/api/v0/instances/$ID/" | grep -q "krea2-tab1"; then
-  ID=$(curl -s --max-time 10 -H "Authorization: Bearer $KEY" "https://console.vast.ai/api/v0/instances/" | python3 -c "
+find_id() {
+  H=$(hostname)
+  if curl -s --max-time 10 -H "Authorization: Bearer $KEY" "https://console.vast.ai/api/v0/instances/$H/" | grep -q "krea2-tab1"; then
+    echo "$H"; return 0
+  fi
+  curl -s --max-time 10 -H "Authorization: Bearer $KEY" "https://console.vast.ai/api/v0/instances/" | python3 -c "
 import json,sys
 try:
-    for i in json.load(sys.stdin):
-        if 'krea2-tab1' in str(i.get('label','')) and i.get('actual_status')=='running':
+    d=json.load(sys.stdin)
+    lst = d.get('instances') if isinstance(d, dict) else d
+    for i in lst or []:
+        if 'krea2-tab1' in str(i.get('label','')) and str(i.get('actual_status'))=='running':
             print(i['id']); break
 except Exception: pass
-")
-fi
-echo "idle-destroy watcher for instance $ID"
-LAST=$(date +%s)
+"
+}
+ID=""
 PREVH=0
+IDLE_LIMIT=${IDLE_DESTROY_SECS:-570}
+for i in $(seq 1 150); do
+  curl -s -o /dev/null --max-time 3 http://127.0.0.1:18188/system_stats && break
+  sleep 4
+done
+LAST=$(date +%s)
+echo "watcher armed; idle limit ${IDLE_LIMIT}s"
 while true; do
   sleep 30
   NOW=$(date +%s)
+  if [ -z "$ID" ]; then
+    ID=$(find_id)
+    echo "watcher tick: resolved instance id [$ID]"
+    [ -n "$ID" ] || { LAST=$NOW; continue; }
+  fi
   Q=$(curl -s --max-time 5 http://127.0.0.1:18188/queue 2>/dev/null)
   if echo "$Q" | python3 -c "import json,sys; d=json.load(sys.stdin); exit(0 if (d.get('queue_running') or d.get('queue_pending')) else 1)" 2>/dev/null; then
     LAST=$NOW
@@ -66,10 +82,14 @@ while true; do
   H=$(curl -s --max-time 5 http://127.0.0.1:18188/history 2>/dev/null | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "$PREVH")
   if [ "$H" -gt "$PREVH" ] 2>/dev/null; then LAST=$NOW; PREVH=$H; fi
   IDLE=$((NOW - LAST))
-  if [ "$IDLE" -ge 570 ]; then
+  if [ "$IDLE" -ge "$IDLE_LIMIT" ]; then
     echo "idle ${IDLE}s -> destroying instance $ID"
-    curl -s -X DELETE -H "Authorization: Bearer $KEY" "https://console.vast.ai/api/v0/instances/$ID/"
-    echo "destroy call sent"
+    for a in 1 2 3 4 5; do
+      R=$(curl -s -X DELETE -H "Authorization: Bearer $KEY" "https://console.vast.ai/api/v0/instances/$ID/")
+      echo "destroy attempt $a: $R"
+      echo "$R" | grep -q "success" && break
+      sleep 10
+    done
     break
   fi
 done
