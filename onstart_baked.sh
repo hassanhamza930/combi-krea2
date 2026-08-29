@@ -42,6 +42,8 @@ if [ -n "${SELFDESTRUCT_KEY:-}" ]; then
   cat > /root/idle_destroy.sh <<'EOS'
 #!/bin/bash
 KEY="$SELFDESTRUCT_KEY"
+LOG=/var/log/portal/provision.log
+log() { echo "[idle-destroy] $*" >> "$LOG" 2>/dev/null || echo "[idle-destroy] $*"; }
 find_id() {
   H=$(hostname)
   if curl -s --max-time 10 -H "Authorization: Bearer $KEY" "https://console.vast.ai/api/v0/instances/$H/" | grep -q "krea2-tab1"; then
@@ -53,7 +55,7 @@ try:
     d=json.load(sys.stdin)
     lst = d.get('instances') if isinstance(d, dict) else d
     for i in lst or []:
-        if 'krea2-tab1' in str(i.get('label','')) and str(i.get('actual_status'))=='running':
+        if 'krea2-tab1' in str(i.get('label','')) and str(i.get('actual_status')) in ('running','loading'):
             print(i['id']); break
 except Exception: pass
 "
@@ -66,27 +68,27 @@ for i in $(seq 1 150); do
   sleep 4
 done
 LAST=$(date +%s)
-echo "watcher armed; idle limit ${IDLE_LIMIT}s"
+log "armed; idle limit ${IDLE_LIMIT}s; hostname=$(hostname)"
 while true; do
   sleep 30
   NOW=$(date +%s)
   if [ -z "$ID" ]; then
     ID=$(find_id)
-    echo "watcher tick: resolved instance id [$ID]"
-    [ -n "$ID" ] || { LAST=$NOW; continue; }
+    log "id lookup -> [$ID]"
+    if [ -z "$ID" ]; then LAST=$NOW; continue; fi
   fi
   Q=$(curl -s --max-time 5 http://127.0.0.1:18188/queue 2>/dev/null)
   if echo "$Q" | python3 -c "import json,sys; d=json.load(sys.stdin); exit(0 if (d.get('queue_running') or d.get('queue_pending')) else 1)" 2>/dev/null; then
     LAST=$NOW
   fi
   H=$(curl -s --max-time 5 http://127.0.0.1:18188/history 2>/dev/null | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "$PREVH")
-  if [ "$H" -gt "$PREVH" ] 2>/dev/null; then LAST=$NOW; PREVH=$H; fi
+  if [ "$H" -gt "$PREVH" ] 2>/dev/null; then LAST=$NOW; PREVH=$H; log "activity: history=$H"; fi
   IDLE=$((NOW - LAST))
   if [ "$IDLE" -ge "$IDLE_LIMIT" ]; then
-    echo "idle ${IDLE}s -> destroying instance $ID"
+    log "idle ${IDLE}s -> destroying $ID"
     for a in 1 2 3 4 5; do
       R=$(curl -s -X DELETE -H "Authorization: Bearer $KEY" "https://console.vast.ai/api/v0/instances/$ID/")
-      echo "destroy attempt $a: $R"
+      log "destroy attempt $a: $R"
       echo "$R" | grep -q "success" && break
       sleep 10
     done
