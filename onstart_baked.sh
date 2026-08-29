@@ -32,3 +32,49 @@ fi
 
 echo "baked worker onstart complete; models already present:"
 ls -la "$COMFY_SRC/models/diffusion_models" "$COMFY_SRC/models/text_encoders" "$COMFY_SRC/models/vae" "$COMFY_SRC/models/loras" 2>/dev/null || true
+
+# [FIX-15] true scale-to-zero: vast only PARKS idle workers (storage keeps
+# billing ~$3/mo). This watcher destroys the whole instance after ~9.5 min
+# of real idleness, beating the engine's 10-min park, so idle costs $0.
+# No re-rent loop is possible: new workers are recruited only when a request
+# is queued, and this fires only after ~9.5 min of zero requests.
+if [ -n "${SELFDESTRUCT_KEY:-}" ]; then
+  cat > /root/idle_destroy.sh <<'EOS'
+#!/bin/bash
+KEY="$SELFDESTRUCT_KEY"
+ID="$(hostname)"
+if ! curl -s --max-time 10 -H "Authorization: Bearer $KEY" "https://console.vast.ai/api/v0/instances/$ID/" | grep -q "krea2-tab1"; then
+  ID=$(curl -s --max-time 10 -H "Authorization: Bearer $KEY" "https://console.vast.ai/api/v0/instances/" | python3 -c "
+import json,sys
+try:
+    for i in json.load(sys.stdin):
+        if 'krea2-tab1' in str(i.get('label','')) and i.get('actual_status')=='running':
+            print(i['id']); break
+except Exception: pass
+")
+fi
+echo "idle-destroy watcher for instance $ID"
+LAST=$(date +%s)
+PREVH=0
+while true; do
+  sleep 30
+  NOW=$(date +%s)
+  Q=$(curl -s --max-time 5 http://127.0.0.1:18188/queue 2>/dev/null)
+  if echo "$Q" | python3 -c "import json,sys; d=json.load(sys.stdin); exit(0 if (d.get('queue_running') or d.get('queue_pending')) else 1)" 2>/dev/null; then
+    LAST=$NOW
+  fi
+  H=$(curl -s --max-time 5 http://127.0.0.1:18188/history 2>/dev/null | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "$PREVH")
+  if [ "$H" -gt "$PREVH" ] 2>/dev/null; then LAST=$NOW; PREVH=$H; fi
+  IDLE=$((NOW - LAST))
+  if [ "$IDLE" -ge 570 ]; then
+    echo "idle ${IDLE}s -> destroying instance $ID"
+    curl -s -X DELETE -H "Authorization: Bearer $KEY" "https://console.vast.ai/api/v0/instances/$ID/"
+    echo "destroy call sent"
+    break
+  fi
+done
+EOS
+  chmod +x /root/idle_destroy.sh
+  setsid /root/idle_destroy.sh >> /var/log/portal/idle_destroy.log 2>&1 &
+  echo "idle-destroy watcher started"
+fi
